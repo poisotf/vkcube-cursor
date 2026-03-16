@@ -51,4 +51,5 @@ void main() {
    vec3 normal = normalize(cross(dX,dY));
    float light = max(0.0, dot(lightDir, normal));
    uFragColor = linearToSrgb(light * texture(tex, texcoord.xy));
+	 uFragColor.a = 1.0;
 }

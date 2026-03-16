@@ -34,6 +34,8 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <signal.h>
+#include <sys/mman.h>
+#include <err.h>
 #if defined(VK_USE_PLATFORM_SCREEN_QNX)
 #include <errno.h>
 #endif
@@ -434,6 +436,7 @@ struct demo {
     struct wl_registry *registry;
     struct wl_compositor *compositor;
     struct wl_surface *window;
+    struct wl_surface *cursor;
     struct xdg_wm_base *xdg_wm_base;
     struct zxdg_decoration_manager_v1 *xdg_decoration_mgr;
     struct zxdg_toplevel_decoration_v1 *toplevel_decoration;
@@ -443,6 +446,8 @@ struct demo {
     struct wl_seat *seat;
     struct wl_pointer *pointer;
     struct wl_keyboard *keyboard;
+		struct wl_shm *shm;
+		struct wl_shm_pool *shm_pool;
     int pending_width, pending_height;
 #endif
 #if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
@@ -887,6 +892,8 @@ static void demo_set_image_layout(struct demo *demo, VkImage image, VkImageAspec
 
 static void demo_draw_build_cmd(struct demo *demo, SubmissionResources *submission_resource,
                                 SwapchainImageResources *swapchain_resource) {
+		int width = 256;
+		int height = 256;
     const VkCommandBufferBeginInfo cmd_buf_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .pNext = NULL,
@@ -894,7 +901,7 @@ static void demo_draw_build_cmd(struct demo *demo, SubmissionResources *submissi
         .pInheritanceInfo = NULL,
     };
     const VkClearValue clear_values[2] = {
-        [0] = {.color.float32 = {0.2f, 0.2f, 0.2f, 0.2f}},
+        [0] = {.color.float32 = {0, 0, 0, 0}},
         [1] = {.depthStencil = {1.0f, 0}},
     };
     const VkRenderPassBeginInfo rp_begin = {
@@ -904,8 +911,8 @@ static void demo_draw_build_cmd(struct demo *demo, SubmissionResources *submissi
         .framebuffer = swapchain_resource->framebuffer,
         .renderArea.offset.x = 0,
         .renderArea.offset.y = 0,
-        .renderArea.extent.width = demo->width,
-        .renderArea.extent.height = demo->height,
+        .renderArea.extent.width = width,
+        .renderArea.extent.height = height,
         .clearValueCount = 2,
         .pClearValues = clear_values,
     };
@@ -931,12 +938,12 @@ static void demo_draw_build_cmd(struct demo *demo, SubmissionResources *submissi
     VkViewport viewport;
     memset(&viewport, 0, sizeof(viewport));
     float viewport_dimension;
-    if (demo->width < demo->height) {
-        viewport_dimension = (float)demo->width;
-        viewport.y = (demo->height - demo->width) / 2.0f;
+    if (width < height) {
+        viewport_dimension = (float)width;
+        viewport.y = (height - width) / 2.0f;
     } else {
-        viewport_dimension = (float)demo->height;
-        viewport.x = (demo->width - demo->height) / 2.0f;
+        viewport_dimension = (float)height;
+        viewport.x = (width - height) / 2.0f;
     }
     viewport.height = viewport_dimension;
     viewport.width = viewport_dimension;
@@ -946,8 +953,8 @@ static void demo_draw_build_cmd(struct demo *demo, SubmissionResources *submissi
 
     VkRect2D scissor;
     memset(&scissor, 0, sizeof(scissor));
-    scissor.extent.width = demo->width;
-    scissor.extent.height = demo->height;
+    scissor.extent.width = width;
+    scissor.extent.height = height;
     scissor.offset.x = 0;
     scissor.offset.y = 0;
     vkCmdSetScissor(submission_resource->cmd, 0, 1, &scissor);
@@ -1398,8 +1405,8 @@ static void demo_prepare_swapchain(struct demo *demo) {
         // If the surface size is undefined, the size is set to the size
         // of the images requested, which must fit within the minimum and
         // maximum values.
-        swapchainExtent.width = demo->width;
-        swapchainExtent.height = demo->height;
+        swapchainExtent.width = 256;
+        swapchainExtent.height = 256;
 
         if (swapchainExtent.width < surfCapabilities.minImageExtent.width) {
             swapchainExtent.width = surfCapabilities.minImageExtent.width;
@@ -1493,10 +1500,10 @@ static void demo_prepare_swapchain(struct demo *demo) {
     // Find a supported composite alpha mode - one of these is guaranteed to be set
     VkCompositeAlphaFlagBitsKHR compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     VkCompositeAlphaFlagBitsKHR compositeAlphaFlags[4] = {
-        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
-        VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
-        VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+			VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+			VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+			VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+			VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
     };
     for (uint32_t i = 0; i < ARRAY_SIZE(compositeAlphaFlags); i++) {
         if (surfCapabilities.supportedCompositeAlpha & compositeAlphaFlags[i]) {
@@ -3070,6 +3077,9 @@ static void handle_surface_configure(void *data, struct xdg_surface *xdg_surface
         demo->height = demo->pending_height;
     }
     demo_resize(demo);
+		struct wl_buffer *buffer = wl_shm_pool_create_buffer(demo->shm_pool, 0, demo->width, demo->height, demo->width*4, 0);
+		wl_surface_attach(demo->window, buffer, 0, 0);
+		wl_surface_commit(demo->window);
 }
 
 static const struct xdg_surface_listener xdg_surface_listener = {handle_surface_configure};
@@ -3105,6 +3115,13 @@ static void demo_create_wayland_window(struct demo *demo) {
     demo->window = wl_compositor_create_surface(demo->compositor);
     if (!demo->window) {
         printf("Can not create wayland_surface from compositor!\n");
+        fflush(stdout);
+        exit(1);
+    }
+
+    demo->cursor = wl_compositor_create_surface(demo->compositor);
+    if (!demo->window) {
+        printf("Can not create cursor wayland_surface from compositor!\n");
         fflush(stdout);
         exit(1);
     }
@@ -3591,7 +3608,10 @@ int find_display_gpu(int gpu_number, uint32_t gpu_count, VkPhysicalDevice *physi
 
 #if defined(VK_USE_PLATFORM_WAYLAND_KHR)
 static void pointer_handle_enter(void *data, struct wl_pointer *pointer, uint32_t serial, struct wl_surface *surface, wl_fixed_t sx,
-                                 wl_fixed_t sy) {}
+                                 wl_fixed_t sy) {
+	struct demo *demo = data;
+	wl_pointer_set_cursor(pointer, serial, demo->cursor, 128, 128);
+}
 
 static void pointer_handle_leave(void *data, struct wl_pointer *pointer, uint32_t serial, struct wl_surface *surface) {}
 
@@ -3694,6 +3714,23 @@ static void registry_handle_global(void *data, struct wl_registry *registry, uin
         wl_seat_add_listener(demo->seat, &seat_listener, demo);
     } else if (strcmp(interface, zxdg_decoration_manager_v1_interface.name) == 0) {
         demo->xdg_decoration_mgr = wl_registry_bind(registry, id, &zxdg_decoration_manager_v1_interface, 1);
+    }
+		else if (strcmp(interface, wl_shm_interface.name) == 0) {
+        demo->shm = wl_registry_bind(registry, id, &wl_shm_interface, 2);
+				size_t memsize = 64*1024*1024;
+				int fd = memfd_create("shm_pool", 0);
+				if (fd == -1)
+          err(EXIT_FAILURE, "memfd_create");
+				ftruncate(fd, memsize);
+				uint8_t *mem = mmap(NULL, memsize, PROT_WRITE, MAP_SHARED, fd, 0);
+				for (size_t i = 0; i < memsize; i += 4) {
+					mem[i] = 51;
+					mem[i+1] = 51;
+					mem[i+2] = 51;
+					mem[i+3] = 255;
+				}
+				munmap(mem, memsize);
+				demo->shm_pool = wl_shm_create_pool(demo->shm, fd, memsize);
     }
 }
 
@@ -4511,7 +4548,7 @@ static void demo_create_surface(struct demo *demo) {
         wayland_createInfo.pNext = NULL;
         wayland_createInfo.flags = 0;
         wayland_createInfo.display = demo->wayland_display;
-        wayland_createInfo.surface = demo->window;
+        wayland_createInfo.surface = demo->cursor;
 
         err = vkCreateWaylandSurfaceKHR(demo->inst, &wayland_createInfo, NULL, &demo->surface);
     }
